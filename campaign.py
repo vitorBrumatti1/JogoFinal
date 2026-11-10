@@ -1,6 +1,7 @@
 """Regras de campanha, arsenal e loja independentes da interface gráfica."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from level_design import LAYOUTS
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,9 @@ STAGES = (
         ((780, "mine"), (1540, "spikes"), (2120, "laser"), (3000, "mine")),
     ),
 )
+
+# V4 changes composition only; names, enemy counts, economy and objectives are retained.
+STAGES = tuple(replace(stage, platforms=LAYOUTS[i]) for i, stage in enumerate(STAGES))
 
 
 class Weapon:

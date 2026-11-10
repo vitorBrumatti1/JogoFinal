@@ -72,7 +72,7 @@ def lettering(message, scale, color, style):
     im = Image.new("RGBA", mask.size)
     draw = ImageDraw.Draw(im)
     # One-pixel outline and extrusion before nearest-neighbour scaling.
-    for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (1, 2), (2, 2)):
+    for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (1, 1)):
         im.paste((5, 8, 24, 255), (dx, dy), mask)
     fill = Image.new("RGBA", mask.size)
     fd = ImageDraw.Draw(fill)

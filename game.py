@@ -8,9 +8,12 @@ from actors import Jogador, Pontuacao, inicializar_banco
 from campaign import Campaign, Weapon, STAGES, WEAPONS
 from ui_fx import ScreenMotion
 from world_fx import Hazard, Barrel, draw_gun
-from effects import Particula, TextoFlutuante
+from effects import Particula, TextoFlutuante, Casing, SpriteEcho
+from polish import TextPool, enemy_role
+from level_design import COVER_POSITIONS, ground_lane
 from sound import Audio
-from combat import Grenade, Impact, draw_projectile, muzzle_flash
+from weapon_art import GunPose, RECOIL, FLASH_TIME, draw_weapon
+from combat import Grenade, Impact, Cover, swept_contacts, draw_projectile, muzzle_flash
 from arcade_style import cabinet_overlay, pixel_text, ArcadeMenuScene
 
 WIDTH, HEIGHT = 960, 640
@@ -38,10 +41,11 @@ def center(message, y, size=20, color=WHITE):
 
 
 class Bloco(arcade.Sprite):
-    def __init__(self, x, y, bridge=False, wall=False):
+    def __init__(self, x, y, bridge=False, wall=False, ballistic=False):
         super().__init__(
             asset("bridge.png" if bridge else ("wall.png" if wall else "stone.png"))
         )
+        self.ballistic = ballistic
         self.width = 48
         self.height = 24 if bridge else 48
         self.left = x
@@ -68,6 +72,19 @@ class Enemy(arcade.Sprite):
         if kind == "charger":
             self.hp += 2
         self.max_hp = self.hp
+        self.hurt = 0.0
+        self.knockback = 0.0
+        self.volley = 0
+        self.target_x = x
+        self.base_color = (
+            (255, 255, 255)
+            if kind == "guard"
+            else (
+                (166, 199, 255)
+                if kind == "shooter"
+                else (255, 153, 127) if kind == "charger" else (255, 255, 255)
+            )
+        )
         self.speed = 1.7 + level * 0.3
         self.direction = -1
         self.low = left or x - 100
@@ -80,10 +97,20 @@ class Enemy(arcade.Sprite):
         self.base_y = y
         self.original = self.texture
         self.flipped = self.texture.flip_left_right()
-        if kind == "shooter":
-            self.color = (255, 190, 160)
+        self.color = self.base_color
+
+    def receive_hit(self, damage, direction, kind="ak"):
+        self.hp -= damage
+        self.hurt = 0.09
+        self.knockback = direction * (
+            0.7 if self.kind == "boss" else 4 if kind in ("shotgun", "rifle") else 2
+        )
 
     def tick(self, dt, player):
+        self.hurt = max(0.0, self.hurt - dt)
+        self.color = (255, 135, 116) if self.hurt else self.base_color
+        self.center_x += self.knockback
+        self.knockback *= 0.75
         self.shot_clock = max(0.0, self.shot_clock - dt)
         self.phase += dt * 3
         self.alert = 0.0
@@ -96,7 +123,13 @@ class Enemy(arcade.Sprite):
             if self.kind == "charger" and abs(player.center_x - self.center_x) < 320:
                 self.direction = 1 if player.center_x > self.center_x else -1
             self.center_x += (
-                self.direction * self.speed * (1.8 if self.kind == "charger" else 1)
+                self.direction
+                * self.speed
+                * (
+                    (1.8 if 0.35 < self.phase % 2.4 < 1.35 else 0.55)
+                    if self.kind == "charger"
+                    else 1
+                )
             )
             if self.left < self.low:
                 self.left = self.low
@@ -125,7 +158,9 @@ class Enemy(arcade.Sprite):
 
 
 class Bullet(arcade.SpriteSolidColor):
-    def __init__(self, x, y, vx, vy=0, hostile=False, damage=1, pierce=1, knife=False):
+    def __init__(
+        self, x, y, vx, vy=0, hostile=False, damage=1, pierce=1, knife=False, kind="ak"
+    ):
         super().__init__(
             24 if knife else (14 if not hostile else 10),
             4 if knife else 5,
@@ -135,6 +170,9 @@ class Bullet(arcade.SpriteSolidColor):
         self.change_x = vx
         self.change_y = vy
         self.life = 1.8
+        self.kind = kind
+        self.origin = (x, y)
+        self.previous_position = (x, y)
         self.hostile = hostile
         self.damage = damage
         self.pierce = pierce
@@ -143,6 +181,7 @@ class Bullet(arcade.SpriteSolidColor):
         self.angle = math.degrees(math.atan2(vy, vx))
 
     def tick(self, dt):
+        self.previous_position = self.position
         self.center_x += self.change_x
         self.center_y += self.change_y
         self.life -= dt
@@ -163,10 +202,19 @@ class TelaJogo(arcade.View):
         self.ended = False
         self.particles = []
         self.impacts = []
+        self.casings = []
+        self.echoes = []
+        self._dash_echo = 0.0
+        self._grounded_before = False
+        self.hud = TextPool()
+        self.currency_pulse = 0.0
+        self.weapon_banner = 0.0
         self.labels = []
         self.shake = 0.0
         self.flash = 0.0
         self.muzzle = 0.0
+        self.recoil = 0.0
+        self.last_shot_origin = None
         self.hitstop = 0.0
         self.world_camera = arcade.Camera2D()
         self.ui_camera = arcade.Camera2D()
@@ -232,6 +280,8 @@ class TelaJogo(arcade.View):
         self.stage = STAGES[self.run.stage]
         self.background = arcade.load_texture(asset(self.stage.background))
         self.blocks = arcade.SpriteList(use_spatial_hash=True)
+        self.ballistic = arcade.SpriteList(use_spatial_hash=True)
+        self.covers = arcade.SpriteList()
         self.decor = arcade.SpriteList()
         self.coins = arcade.SpriteList()
         self.enemies = arcade.SpriteList()
@@ -245,27 +295,43 @@ class TelaJogo(arcade.View):
         self.player.position = (90, 150)
         self.players.append(self.player)
         for x in range(0, self.stage.length + 48, 48):
-            self.blocks.append(Bloco(x, 96))
+            floor = Bloco(x, 96, ballistic=True)
+            self.blocks.append(floor)
+            self.ballistic.append(floor)
             self.decor.append(Bloco(x, 48, wall=True))
         for idx, (x, y, w) in enumerate(self.stage.platforms):
             for bx in range(int(x - w / 2), int(x + w / 2), 48):
                 self.blocks.append(Bloco(bx, y, bridge=idx % 3 == 1))
                 if idx % 3 != 1:
                     self.decor.append(Bloco(bx, y - 48, wall=True))
-            for offset in (-50, 0, 50):
+            offsets = (
+                (-28, 28)
+                if w == 144
+                else (-72, -24, 24, 72) if w == 240 else (-50, 0, 50)
+            )
+            for offset in offsets:
                 self.add_coin(
                     x + offset,
                     y + 32,
                     special=idx == len(self.stage.platforms) - 1 and offset == 0,
                 )
+            if idx == len(self.stage.platforms) - 1 and 0 not in offsets:
+                self.add_coin(x, y + 32, special=True)
             if idx % 3 == 0:
                 self.barrels.append(Barrel(x + 68, y + 17))
         for x in range(180, self.stage.length - 180, 260):
             if not any(
                 y < 200 and px - pw / 2 - 30 < x < px + pw / 2 + 30
                 for px, y, pw in self.stage.platforms
+            ) and not any(
+                cx - 30 < x < cx + 66 for cx in COVER_POSITIONS[self.run.stage]
             ):
                 self.add_coin(x, 128)
+        for x in COVER_POSITIONS[self.run.stage]:
+            cover = Cover(x)
+            self.covers.append(cover)
+            self.blocks.append(cover)
+            self.ballistic.append(cover)
         terrain = {
             "jungle": (255, 255, 255),
             "desert": (240, 184, 131),
@@ -282,7 +348,9 @@ class TelaJogo(arcade.View):
         for x, kind in self.stage.hazards:
             self.hazards.append(Hazard(x, kind))
         for i in range(self.stage.enemies):
-            kind = "shooter" if i % 3 == 1 else "guard"
+            kind = (
+                "shooter" if i % 3 == 1 and (self.run.stage > 0 or i > 2) else "guard"
+            )
             if self.run.stage >= 1 and i % 4 == 2:
                 kind = "drone"
             elif self.run.stage >= 1 and i % 5 == 4:
@@ -298,9 +366,13 @@ class TelaJogo(arcade.View):
                 left, right = px - pw / 2, px + pw / 2
             else:
                 y = 130
-                left, right = max(300, x - 90), min(self.stage.length - 180, x + 90)
+                x, left, right = ground_lane(
+                    self.stage, x, COVER_POSITIONS[self.run.stage]
+                )
             self.enemies.append(Enemy(x, y, kind, self.run.stage, left, right))
         self.boss = None
+        self.boss_introduced = False
+        self.boss_intro = 0.0
         if self.run.stage == 3:
             self.boss = Enemy(self.stage.length - 350, 168, "boss", 3)
             self.enemies.append(self.boss)
@@ -311,6 +383,9 @@ class TelaJogo(arcade.View):
         self.camera_x = WIDTH / 2
         self.particles.clear()
         self.impacts.clear()
+        self.casings.clear()
+        self.echoes.clear()
+        self._grounded_before = False
         self.labels.clear()
         self.ambushes = set()
         self.combo = 0
@@ -332,16 +407,27 @@ class TelaJogo(arcade.View):
         if len(self.labels) < 35:
             self.labels.append(TextoFlutuante(message, x, y, color))
 
+    def gun_pose(self):
+        return GunPose(
+            (self.player.center_x, self.player.center_y + 3),
+            self.aim_angle,
+            self.weapon.kind,
+            self.recoil,
+        )
+
     def fire(self):
         if self.weapon.ammo == 0 and not self.weapon.reloading:
             if self.weapon.reload():
-                self.audio.play("reload")
+                self.audio.play("reload_v4")
         if not self.weapon.fire():
             return
-        ux, uy = self.aim()
+        self.aim()
+        self.recoil = RECOIL[self.weapon.kind]
+        pose = self.gun_pose()
+        x, y = pose.muzzle
+        self.last_shot_origin = (x, y)
+        self.muzzle = FLASH_TIME[self.weapon.kind]
         spec = self.weapon.spec
-        x = self.player.center_x + ux * 22
-        y = self.player.center_y + 3 + uy * 22
         for i in range(spec.pellets):
             spread = (
                 (i - (spec.pellets - 1) / 2) * spec.spread
@@ -349,19 +435,26 @@ class TelaJogo(arcade.View):
                 else random.uniform(-spec.spread, spec.spread)
             )
             a = self.aim_angle + spread
-            self.bullets.append(
-                Bullet(
-                    x,
-                    y,
-                    math.cos(a) * spec.speed,
-                    math.sin(a) * spec.speed,
-                    damage=spec.damage + self.run.damage_level,
-                    pierce=spec.pierce,
-                )
+            bullet = Bullet(
+                x,
+                y,
+                math.cos(a) * spec.speed,
+                math.sin(a) * spec.speed,
+                damage=spec.damage + self.run.damage_level,
+                pierce=spec.pierce,
+                kind=self.weapon.kind,
             )
-        self.muzzle = 0.055
-        self.audio.play("shot")
-        self.burst(x - ux * 12, y - uy * 12, (210, 164, 67), 2)
+            bullet.prefix_start = pose.pivot
+            self.bullets.append(bullet)
+        self.audio.play("shot_" + self.weapon.kind)
+        if len(self.casings) < 24:
+            self.casings.append(
+                Casing(*pose.point(1, 4), 1 if math.cos(self.aim_angle) > 0 else -1)
+            )
+        if self.weapon.kind in ("shotgun", "rifle"):
+            self.shake = max(
+                self.shake, 0.08 if self.weapon.kind == "shotgun" else 0.06
+            )
 
     def throw_knife(self):
         if not self.run.throw_knife():
@@ -392,7 +485,7 @@ class TelaJogo(arcade.View):
     def damage(self):
         if not self.run.damage():
             return
-        self.audio.play("hit")
+        self.audio.play("damage")
         self.player.receber_dano()
         self.shake = 0.23
         self.flash = 0.28
@@ -409,7 +502,9 @@ class TelaJogo(arcade.View):
         gain = (50 if enemy.kind == "boss" else 3) * multiplier
         self.run.score += gain
         self.run.wallet += 25 if enemy.kind == "boss" else 4 + self.run.stage
-        self.audio.play("boom")
+        self.audio.play("impact")
+        if len(self.echoes) < 20:
+            self.echoes.append(SpriteEcho(enemy, death=True))
         self.burst(*enemy.position, (255, 151, 57), 24)
         self.label(f"+{gain} / {multiplier}x", enemy.center_x, enemy.top)
         self.shake = 0.17
@@ -417,7 +512,7 @@ class TelaJogo(arcade.View):
         enemy.remove_from_sprite_lists()
 
     def explode(self, x, y, radius=110):
-        self.audio.play("boom")
+        self.audio.play("boom_v4")
         self.impact(x, y, True)
         self.burst(x, y, (255, 148, 46), 38)
         self.shake = 0.3
@@ -461,7 +556,25 @@ class TelaJogo(arcade.View):
         self.entrance = max(0, self.entrance - dt)
         self.flash = max(0, self.flash - dt)
         self.shake = max(0, self.shake - dt)
+        self.boss_intro = max(0.0, self.boss_intro - dt)
+        if (
+            self.boss
+            and not self.boss_introduced
+            and self.player.center_x > self.stage.length - 900
+        ):
+            self.boss_introduced = True
+            self.boss_intro = 1.8
+            self.run.invulnerable = max(self.run.invulnerable, 1.8)
+            self.audio.play("menu")
+        self.currency_pulse = max(0.0, self.currency_pulse - dt)
+        self.weapon_banner = max(0.0, self.weapon_banner - dt)
+        self._dash_echo = max(0.0, self._dash_echo - dt)
+        for item in self.casings + self.echoes:
+            item.update(dt)
+        self.casings = [item for item in self.casings if item.life > 0]
+        self.echoes = [item for item in self.echoes if item.life > 0]
         self.muzzle = max(0, self.muzzle - dt)
+        self.recoil = max(0.0, self.recoil - dt * 34)
         self.combo_time = max(0, self.combo_time - dt)
         if not self.combo_time:
             self.combo = 0
@@ -497,15 +610,23 @@ class TelaJogo(arcade.View):
             else (int(right) - int(left)) * 4.6
         )
         self.physics_engine.update()
-        self.player.update(dt)
         self.aim()
-        if self.mouse_aim:
-            self.player.virado_para = 1 if math.cos(self.aim_angle) >= 0 else -1
-            # Visual facing follows aim, while animation priority remains in Jogador.update.
-            change_x = self.player.change_x
-            self.player.change_x = self.player.virado_para * 0.001 if change_x else 0
-            self.player.update(0)
-            self.player.change_x = change_x
+        self.player.grounded = self.physics_engine.can_jump()
+        self.player.aim_facing = (
+            (1 if math.cos(self.aim_angle) >= 0 else -1) if self.mouse_aim else None
+        )
+        self.player.update(dt)
+        if (
+            self.player.grounded
+            and not self._grounded_before
+            and self.player.tempo_total > 0.15
+        ):
+            self.burst(self.player.center_x, self.player.bottom, (176, 171, 141), 5)
+            self.audio.play("land")
+        self._grounded_before = self.player.grounded
+        if self.run.dash_time and not self._dash_echo and len(self.echoes) < 20:
+            self.echoes.append(SpriteEcho(self.player))
+            self._dash_echo = 0.04
         self.player.left = max(0, self.player.left)
         self.player.right = min(self.stage.length, self.player.right)
         if self.player.top < 0:
@@ -520,8 +641,9 @@ class TelaJogo(arcade.View):
             value = 5 if coin.special else 1
             self.run.score += value
             self.run.wallet += value * 2
+            self.currency_pulse = 0.3
             self.collected += 1
-            self.audio.play("coin")
+            self.audio.play("coin_v4")
             self.burst(*coin.position, GOLD, 10)
             self.label(f"+{value*2} $", coin.center_x, coin.top + 10)
             coin.remove_from_sprite_lists()
@@ -538,51 +660,7 @@ class TelaJogo(arcade.View):
                     "EMBOSCADA!", self.player.center_x, self.player.top + 35, RED
                 )
         self.update_enemy_attacks(dt)
-        for bullet in list(self.bullets):
-            bullet.tick(dt)
-            if bullet.life <= 0 or arcade.check_for_collision_with_list(
-                bullet, self.blocks
-            ):
-                self.impact(*bullet.position)
-                self.burst(*bullet.position, (210, 205, 161), 3)
-                bullet.remove_from_sprite_lists()
-                continue
-            grenade_hits = arcade.check_for_collision_with_list(bullet, self.grenades)
-            if grenade_hits:
-                grenade = grenade_hits[0]
-                grenade.remove_from_sprite_lists()
-                bullet.remove_from_sprite_lists()
-                self.explode(*grenade.position, radius=90)
-                continue
-            barrels = arcade.check_for_collision_with_list(bullet, self.barrels)
-            if barrels:
-                barrel = barrels[0]
-                barrel.remove_from_sprite_lists()
-                bullet.remove_from_sprite_lists()
-                self.explode(*barrel.position)
-                continue
-            for enemy in arcade.check_for_collision_with_list(bullet, self.enemies):
-                if id(enemy) in bullet.hit_ids:
-                    continue
-                bullet.hit_ids.add(id(enemy))
-                enemy.hp -= bullet.damage
-                bullet.pierce -= 1
-                self.impact(*bullet.position)
-                self.burst(*bullet.position, GOLD, 5)
-                if enemy.hp <= 0:
-                    self.defeat(enemy)
-                if bullet.pierce <= 0:
-                    bullet.remove_from_sprite_lists()
-                    break
-        for bullet in list(self.hostile):
-            bullet.tick(dt)
-            if arcade.check_for_collision(bullet, self.player):
-                self.damage()
-                bullet.remove_from_sprite_lists()
-            elif bullet.life <= 0 or arcade.check_for_collision_with_list(
-                bullet, self.blocks
-            ):
-                bullet.remove_from_sprite_lists()
+        self.update_projectiles(dt)
         for grenade in list(self.grenades):
             if grenade.tick(dt, self.blocks):
                 grenade.remove_from_sprite_lists()
@@ -618,6 +696,72 @@ class TelaJogo(arcade.View):
                 self.transition = 1.4
                 self.clear_input()
 
+    def update_projectiles(self, dt):
+        friendly_groups = [
+            ("cover", self.ballistic),
+            ("grenade", self.grenades),
+            ("barrel", self.barrels),
+            ("enemy", self.enemies),
+        ]
+        hostile_groups = [("cover", self.ballistic), ("player", self.players)]
+        for projectiles, groups in (
+            (self.bullets, friendly_groups),
+            (self.hostile, hostile_groups),
+        ):
+            for bullet in list(projectiles):
+                prefix_start = getattr(bullet, "prefix_start", None)
+                if prefix_start is not None:
+                    del bullet.prefix_start
+                bullet.tick(dt)
+                if (
+                    bullet.life <= 0
+                    or bullet.center_x < -100
+                    or bullet.center_x > self.stage.length + 100
+                    or not -100 < bullet.center_y < 900
+                ):
+                    bullet.remove_from_sprite_lists()
+                    continue
+                for _, _, category, target, point in swept_contacts(
+                    prefix_start or bullet.previous_position,
+                    bullet.position,
+                    groups,
+                    radius=2.0,
+                ):
+                    if category == "enemy":
+                        if target not in self.enemies or id(target) in bullet.hit_ids:
+                            continue
+                        bullet.hit_ids.add(id(target))
+                        target.receive_hit(
+                            bullet.damage,
+                            1 if bullet.change_x >= 0 else -1,
+                            bullet.kind,
+                        )
+                        self.audio.play("impact")
+                        bullet.pierce -= 1
+                        self.impact(*point)
+                        self.burst(*point, GOLD, 4)
+                        if target.hp <= 0:
+                            self.defeat(target)
+                        if bullet.pierce > 0:
+                            continue
+                    elif category == "grenade":
+                        if target not in self.grenades:
+                            continue
+                        target.remove_from_sprite_lists()
+                        self.explode(*target.position, radius=90)
+                    elif category == "barrel":
+                        if target not in self.barrels:
+                            continue
+                        target.remove_from_sprite_lists()
+                        self.explode(*target.position)
+                    elif category == "player":
+                        self.damage()
+                    else:
+                        self.impact(*point)
+                    bullet.position = point
+                    bullet.remove_from_sprite_lists()
+                    break
+
     def update_enemy_attacks(self, dt):
         for enemy in list(self.enemies):
             if abs(enemy.center_x - self.player.center_x) > 760:
@@ -639,9 +783,11 @@ class TelaJogo(arcade.View):
                     enemy.shot_clock = max(3.5, 4.8 - self.run.stage * 0.35)
                 continue
             eligible = enemy.kind != "charger" and enemy.can_aim(
-                self.player, self.blocks
+                self.player, self.ballistic
             )
             enemy.aim_time = min(0.65, enemy.aim_time + dt) if eligible else 0.0
+            if eligible and enemy.shot_clock < 0.65 and not enemy.alert:
+                enemy.target_x = self.player.center_x
             enemy.alert = eligible and enemy.shot_clock < 0.65
             if not eligible or enemy.shot_clock > 0 or enemy.aim_time < 0.6:
                 continue
@@ -651,16 +797,29 @@ class TelaJogo(arcade.View):
             )
             enraged = enemy.kind == "boss" and enemy.hp < enemy.max_hp * 0.5
             speed = 3.0 + self.run.stage * 0.25
-            for spread in ((-0.14, 0, 0.14) if enemy.kind == "boss" else (0,)):
-                self.hostile.append(
-                    Bullet(
-                        enemy.center_x + enemy.direction * 24,
-                        enemy.center_y,
-                        math.cos(a + spread) * speed,
-                        math.sin(a + spread) * speed,
-                        True,
+            enemy.volley += 1
+            mortar = enemy.kind == "boss" and enemy.volley % 3 == 0
+            if mortar:
+                for drift in (-0.5, 0.5):
+                    grenade = Grenade(
+                        enemy.center_x,
+                        enemy.top + 12,
+                        max(-4, min(4, (enemy.target_x - enemy.center_x) / 85)) + drift,
                     )
-                )
+                    grenade.change_y = 3.0
+                    if len(self.grenades) < 8:
+                        self.grenades.append(grenade)
+            else:
+                for spread in ((-0.14, 0, 0.14) if enemy.kind == "boss" else (0,)):
+                    self.hostile.append(
+                        Bullet(
+                            enemy.center_x + enemy.direction * 24,
+                            enemy.center_y,
+                            math.cos(a + spread) * speed,
+                            math.sin(a + spread) * speed,
+                            True,
+                        )
+                    )
             enemy.shot_clock = (
                 (1.35 if enraged else 1.9)
                 if enemy.kind == "boss"
@@ -673,6 +832,7 @@ class TelaJogo(arcade.View):
             return
         self.ended = True
         self.clear_input()
+        self.audio.play("victory" if victory else "defeat")
         self.window.show_view(TelaGameOver(self.run.score, self.run.time, victory))
 
     def on_draw(self):
@@ -686,7 +846,7 @@ class TelaJogo(arcade.View):
                 arcade.LBWH(i * WIDTH - offset, 0, WIDTH, HEIGHT),
                 pixelated=True,
             )
-        shake = 0 if self.window.reduced_effects else self.shake * 24
+        shake = 0 if self.window.reduced_effects else min(4, self.shake * 20)
         self.camera_shake = (
             random.uniform(-shake, shake),
             random.uniform(-shake, shake),
@@ -699,6 +859,8 @@ class TelaJogo(arcade.View):
         self.decor.draw(pixelated=True)
         self.blocks.draw(pixelated=True)
         self.draw_terrain_caps()
+        for cover in self.covers:
+            cover.draw_fx(self.stage.theme)
         for i, (x, y, w) in enumerate(self.stage.platforms):
             if i % 3 == 1:
                 for px in (x - w / 2, x + w / 2):
@@ -710,27 +872,16 @@ class TelaJogo(arcade.View):
         self.barrels.draw()
         for barrel in self.barrels:
             barrel.draw_fx()
+        self.draw_environment_details()
         self.draw_supply()
         self.draw_exit()
         self.coins.draw(pixelated=True)
         self.enemies.draw(pixelated=True)
-        if self.run.dash_time:
-            for offset in (15, 30, 45):
-                arcade.draw_circle_filled(
-                    self.player.center_x - offset * self.dash_direction,
-                    self.player.center_y,
-                    14,
-                    (104, 222, 238, 45),
-                )
+        for echo in self.echoes:
+            echo.draw()
         self.players.draw(pixelated=True)
         self.aim()
-        draw_gun(
-            self.player.center_x,
-            self.player.center_y + 3,
-            self.aim_angle,
-            self.weapon.kind,
-            3 if self.muzzle else 0,
-        )
+        draw_weapon(self.gun_pose())
         for bullet in self.bullets:
             draw_projectile(bullet)
         for bullet in self.hostile:
@@ -738,9 +889,10 @@ class TelaJogo(arcade.View):
         for grenade in self.grenades:
             grenade.draw_fx()
         if self.muzzle:
-            x = self.player.center_x + math.cos(self.aim_angle) * 35
-            y = self.player.center_y + 3 + math.sin(self.aim_angle) * 35
-            muzzle_flash(x, y, self.aim_angle)
+            x, y = self.gun_pose().muzzle
+            muzzle_flash(x, y, self.aim_angle, self.weapon.kind)
+        for casing in self.casings:
+            casing.draw()
         for effect in self.impacts:
             effect.draw()
         for p in self.particles:
@@ -748,6 +900,7 @@ class TelaJogo(arcade.View):
         for p in self.labels:
             p.draw()
         for enemy in self.enemies:
+            enemy_role(enemy)
             if enemy.alert and enemy.kind != "charger":
                 text("!", enemy.center_x, enemy.top + 5, 14, RED, bold=True)
             if enemy.kind == "boss":
@@ -780,6 +933,13 @@ class TelaJogo(arcade.View):
             rect(180, HEIGHT / 2 - 15, 600, 96, (18, 33, 38, 225))
             center(self.stage.name, HEIGHT / 2 + 39, 24, GOLD)
             center(self.stage.subtitle, HEIGHT / 2 + 5, 12)
+        if self.boss_intro:
+            rect(180, 88, 600, 72, (18, 31, 47, 220))
+            center("GUARDIÃO GLACIAL", 127, 24, GOLD)
+            center("Observe a mira. Rajadas e morteiros alternados.", 101, 12)
+        if self.boss and self.boss.hp > 0 and self.boss_introduced:
+            rect(295, HEIGHT - 85, 370, 7, (41, 51, 61))
+            rect(295, HEIGHT - 85, 370 * self.boss.hp / self.boss.max_hp, 7, RED)
         if self.transition:
             rect(0, 0, WIDTH, HEIGHT, (18, 33, 38, 175))
             center("SETOR CONCLUÍDO", 340, 34, GOLD)
@@ -799,6 +959,8 @@ class TelaJogo(arcade.View):
         if self.stage.theme == "jungle":
             return
         for b in self.blocks:
+            if getattr(b, "is_cover", False):
+                continue
             if abs(b.center_x - self.camera_x) > WIDTH / 2 + 60:
                 continue
             if self.stage.theme == "foundry":
@@ -822,6 +984,25 @@ class TelaJogo(arcade.View):
         self.accumulator = 0.0
         self.window.set_mouse_visible(False)
 
+    def draw_environment_details(self):
+        if self.window.reduced_effects:
+            return
+        if self.stage.theme == "jungle":
+            for x, y, w in self.stage.platforms:
+                if abs(x - self.camera_x) > 600:
+                    continue
+                for dx in (-w / 2 + 9, w / 2 - 12):
+                    sway = math.sin(self.run.time * 1.8 + x) * 2
+                    arcade.draw_line(
+                        x + dx, y, x + dx + sway, y + 12, (100, 155, 74), 2
+                    )
+                    arcade.draw_line(
+                        x + dx, y + 4, x + dx + sway + 5, y + 9, (128, 182, 78), 2
+                    )
+        elif self.stage.theme == "foundry":
+            alpha = int(38 + math.sin(self.run.time * 3) * 15)
+            rect(self.camera_x - WIDTH / 2, 96, WIDTH, 5, (255, 137, 52, alpha))
+
     def weather(self):
         if self.window.reduced_effects:
             return
@@ -830,6 +1011,11 @@ class TelaJogo(arcade.View):
                 x = (i * 137 - self.run.time * 28) % WIDTH
                 y = (i * 83 - self.run.time * (25 + i % 8)) % HEIGHT
                 arcade.draw_circle_filled(x, y, 1 + (i % 2), (220, 237, 250, 135))
+        elif self.stage.theme == "desert":
+            for i in range(15):
+                x = (i * 173 + self.run.time * 31) % WIDTH
+                y = 130 + (i * 67) % 300
+                arcade.draw_rect_filled(arcade.LBWH(x, y, 4, 1), (231, 188, 128, 95))
         elif self.stage.theme == "foundry":
             for i in range(18):
                 arcade.draw_circle_filled(
@@ -854,69 +1040,132 @@ class TelaJogo(arcade.View):
         text("SAÍDA", x - 24, 77, 12, GOLD, bold=True)
 
     def draw_hud(self):
-        rect(0, HEIGHT - 86, WIDTH, 86, (18, 33, 38, 240))
-        rect(0, HEIGHT - 89, WIDTH, 3, GOLD)
-        text("COIN COMMANDO / V3", 18, HEIGHT - 25, 11, GOLD, bold=True)
-        text(f"{self.run.score:06d}", 18, HEIGHT - 56, 23, WHITE, bold=True)
-        text(f"$ {self.run.wallet:03d}", 18, HEIGHT - 76, 11, GOLD)
-        text("VIDAS", 215, HEIGHT - 24, 10, (161, 183, 164))
+        rect(8, HEIGHT - 64, WIDTH - 16, 57, (12, 24, 34, 238))
+        rect(8, HEIGHT - 65, WIDTH - 16, 2, (122, 174, 173))
+        label = self.hud.draw
+        label("score", f"{self.run.score:06d}", 20, HEIGHT - 30, 20, WHITE, True)
+        label("scoretag", "PTS", 133, HEIGHT - 25, 8, (153, 176, 171))
+        label(
+            "wallet",
+            f"$ {self.run.wallet:03d}",
+            20,
+            HEIGHT - 50,
+            12,
+            WHITE if self.currency_pulse else GOLD,
+            True,
+        )
         for i in range(5):
-            rect(
-                215 + i * 19,
-                HEIGHT - 49,
-                14,
-                14,
-                RED if i < self.run.health else (52, 67, 65),
+            x = 180 + i * 19
+            y = HEIGHT - 25
+            color = RED if i < self.run.health else (50, 65, 70)
+            arcade.draw_polygon_filled(
+                [
+                    (x - 6, y + 4),
+                    (x - 2, y + 7),
+                    (x + 1, y + 4),
+                    (x + 4, y + 7),
+                    (x + 8, y + 4),
+                    (x + 8, y),
+                    (x + 1, y - 8),
+                    (x - 6, y),
+                ],
+                color,
             )
-        text(
-            (
-                "DASH PRONTO"
-                if not self.run.dash_cooldown
-                else f"DASH {self.run.dash_cooldown:.1f}s"
-            ),
-            215,
-            HEIGHT - 73,
-            10,
-        )
-        text(self.weapon.spec.name, 360, HEIGHT - 24, 11, GOLD)
-        text(
-            "RECARGA" if self.weapon.reloading else f"{self.weapon.ammo:02d} / ∞",
-            360,
-            HEIGHT - 53,
-            19,
-        )
-        text(
-            f"T: FACAS {self.run.knives:02d}   DANO +{self.run.damage_level}",
-            360,
-            HEIGHT - 74,
-            10,
-        )
-        text(
-            f"MOEDAS {self.collected:02d}/{self.total_coins:02d}", 595, HEIGHT - 26, 12
-        )
-        text(f"META {self.coin_goal} / 70%", 595, HEIGHT - 49, 10, GOLD)
-        text(f"{self.run.time:06.1f}s", 595, HEIGHT - 74, 12)
-        text(f"SETOR {self.run.stage+1:02d} / 04", 795, HEIGHT - 25, 12, GOLD)
-        text(
-            (
-                f"COMBO {self.combo} / {min(4,1+self.combo//3)}x"
-                if self.combo
-                else ("SEM SOM" if self.audio.muted else "SOM ON")
-            ),
-            795,
+        label("dash", "DASH", 176, HEIGHT - 51, 8, (160, 198, 211))
+        rect(210, HEIGHT - 49, 42, 4, (42, 61, 70))
+        rect(
+            210,
             HEIGHT - 49,
-            11,
+            42 * (1 - self.run.dash_cooldown / 1.8),
+            4,
+            (127, 218, 235),
         )
-        text("B: LOJA NO SUPRIMENTO", 795, HEIGHT - 74, 8)
-        rect(15, 12, WIDTH - 30, 30, (18, 33, 38, 225))
-        text(
-            "A/D mover  ESPAÇO pular  MOUSE mirar/atirar  T faca  SHIFT dash  1–4 armas  R recarga",
-            26,
-            23,
+        label("knives", f"T {self.run.knives:02d}", 264, HEIGHT - 51, 11, WHITE)
+        label(
+            "gun",
+            self.weapon.spec.name,
+            330,
+            HEIGHT - 23,
             10,
+            GOLD if self.weapon_banner else WHITE,
         )
-        rect(710, 48, 225, 4, (38, 60, 58))
-        rect(710, 48, 225 * self.player.center_x / self.stage.length, 4, GOLD)
+        draw_weapon(GunPose((350, HEIGHT - 47), 0, self.weapon.kind), hands=False)
+        label(
+            "ammo",
+            (
+                "RECARGA"
+                if self.weapon.reloading
+                else f"{self.weapon.ammo:02d} / {self.weapon.capacity}"
+            ),
+            405,
+            HEIGHT - 52,
+            18,
+            GOLD,
+            True,
+        )
+        if self.weapon.reloading:
+            rect(
+                403,
+                HEIGHT - 59,
+                106 * (1 - self.weapon.reloading / self.weapon.spec.reload_time),
+                2,
+                GOLD,
+            )
+        label(
+            "coins",
+            f"MOEDAS {self.collected:02d}/{self.total_coins:02d}",
+            575,
+            HEIGHT - 25,
+            11,
+            WHITE,
+        )
+        label("goal", f"META {self.coin_goal}", 699, HEIGHT - 24, 8, GOLD)
+        rect(575, HEIGHT - 48, 145, 5, (45, 65, 66))
+        rect(
+            575,
+            HEIGHT - 48,
+            145 * min(1, self.collected / max(1, self.coin_goal)),
+            5,
+            (244, 202, 94),
+        )
+        label(
+            "stage", f"SETOR {self.run.stage+1:02d} / 04", 789, HEIGHT - 24, 11, WHITE
+        )
+        label("timer", f"{self.run.time:05.1f}s", 790, HEIGHT - 50, 12, (162, 195, 199))
+        if self.combo:
+            label(
+                "combo",
+                f"{min(4,1+self.combo//3)}x / COMBO {self.combo}",
+                775,
+                HEIGHT - 87,
+                13,
+                GOLD,
+                True,
+            )
+            rect(774, HEIGHT - 94, 134 * self.combo_time / 3, 2, GOLD)
+        if self.player.center_x < 260 and self.run.time < 12:
+            rect(18, 15, 620, 28, (14, 29, 36, 215))
+            label(
+                "help",
+                "A/D mover • ESPAÇO pular • MOUSE mirar • SHIFT dash • T faca • B loja",
+                28,
+                24,
+                10,
+                WHITE,
+            )
+        elif self.player.center_x > self.stage.length - 260:
+            label(
+                "exithelp", "B: suprimentos   /   Alcance a bandeira", 24, 22, 11, GOLD
+            )
+        if self.weapon_banner:
+            label(
+                "swap",
+                self.weapon.spec.name,
+                self.player.center_x - self.camera_center() + WIDTH / 2 - 35,
+                self.player.top + 17,
+                11,
+                GOLD,
+            )
 
     def on_key_press(self, key, modifiers):
         if key in (arcade.key.P, arcade.key.ESCAPE):
@@ -943,7 +1192,7 @@ class TelaJogo(arcade.View):
             self.firing = True
         elif key == arcade.key.R:
             if self.weapon.reload():
-                self.audio.play("reload")
+                self.audio.play("reload_v4")
         elif key == arcade.key.T:
             self.throw_knife()
         elif key in (arcade.key.LSHIFT, arcade.key.RSHIFT):
@@ -957,7 +1206,7 @@ class TelaJogo(arcade.View):
                         else self.player.virado_para
                     )
                 )
-                self.audio.play("jump")
+                self.audio.play("dash")
         elif key == arcade.key.B:
             if (
                 self.player.center_x < 260
@@ -974,7 +1223,10 @@ class TelaJogo(arcade.View):
             arcade.key.KEY_3,
             arcade.key.KEY_4,
         ):
-            self.run.equip(("ak", "smg", "shotgun", "rifle")[key - arcade.key.KEY_1])
+            if self.run.equip(
+                ("ak", "smg", "shotgun", "rifle")[key - arcade.key.KEY_1]
+            ):
+                self.weapon_banner = 0.8
 
     def settings(self, key):
         if key == arcade.key.F8:
@@ -1187,14 +1439,39 @@ class TelaLoja(Backdrop):
         super().__init__()
         self.game = game
         self.between = between
-        self.message = "Escolha seu arsenal. A pontuação do ranking não é gasta."
+        self.message = "Compare as barras com a marca branca da arma equipada."
+        self.success = True
+        self.purchase_time = 0.0
+        self.stats = TextPool()
         self.background = arcade.load_texture(asset(game.stage.background))
         self.ui.buttons.clear()
         for i, (key, label, subtitle) in enumerate(self.catalog):
-            col = i % 2
-            row = i // 2
-            box = (55 + col * 435, 406 - row * 79, 415, 66)
-            self.ui.add(key, label, box, lambda item=key: self.purchase(item), subtitle)
+            if i < 3:
+                button = self.ui.add(
+                    key,
+                    WEAPONS[key].name,
+                    (42 + i * 301, 318, 274, 165),
+                    lambda item=key: self.purchase(item),
+                    subtitle,
+                )
+                button.card = True
+                button.render_extra = lambda b=button, item=key: self.weapon_card(
+                    b, item
+                )
+            else:
+                short = {
+                    "knives": "5 FACAS",
+                    "damage": "DANO +1",
+                    "rate": "CADENCIA +13%",
+                    "heal": "KIT MEDICO",
+                }[key]
+                self.ui.add(
+                    key,
+                    short,
+                    (42 + (i - 3) * 224, 224, 204, 70),
+                    lambda item=key: self.purchase(item),
+                    subtitle,
+                )
         self.ui.add(
             "resume",
             (
@@ -1202,14 +1479,14 @@ class TelaLoja(Backdrop):
                 if between or game.run.time == 0
                 else "ENTER / VOLTAR AO COMBATE"
             ),
-            (490, 169, 415, 66),
+            (520, 112, 398, 52),
             self.resume,
-            "As compras duram esta campanha",
+            "Equipamentos acompanham a campanha",
         )
         self.ui.add(
             "menu",
             "M / ENCERRAR CAMPANHA",
-            (55, 62, 300, 35),
+            (42, 65, 320, 35),
             lambda: self.window.show_view(TelaMenu()),
         )
 
@@ -1217,41 +1494,111 @@ class TelaLoja(Backdrop):
         self.game.clear_input()
         self.window.set_mouse_visible(True)
 
+    def on_update(self, dt):
+        super().on_update(dt)
+        self.purchase_time = max(0.0, self.purchase_time - dt)
+
     def purchase(self, key):
-        ok, self.message = self.game.run.buy(key)
-        self.window.audio.play("coin" if ok else "hit")
+        if key in self.game.run.weapons:
+            self.game.run.equip(key)
+            self.success = True
+            self.message = "Arma equipada. Nenhum crédito descontado."
+        else:
+            self.success, self.message = self.game.run.buy(key)
+        self.purchase_time = 0.45
+        self.game.currency_pulse = 0.3
+        self.game.weapon_banner = 0.8
+        self.window.audio.play("coin_v4" if self.success else "damage")
 
     def resume(self):
         self.game.paused = False
         self.game.accumulator = 0.0
         self.window.show_view(self.game)
 
+    def weapon_card(self, button, key):
+        x, y, w, h = button.box
+        spec = WEAPONS[key]
+        run = self.game.run
+        draw_weapon(GunPose((x + 62, y + 101), 0, key), hands=False)
+        owned = key in run.weapons
+        badge = (
+            "EQUIPADA"
+            if run.equipped == key
+            else "ADQUIRIDA" if owned else f"$ {spec.price}"
+        )
+        tint = (121, 224, 207) if owned else GOLD if run.wallet >= spec.price else RED
+        self.stats.draw(key + "badge", badge, x + 153, y + 101, 10, tint, True)
+        values = (
+            ("DANO", spec.damage / 4, run.weapon.spec.damage / 4),
+            (
+                "RITMO",
+                min(1, 0.065 / spec.interval),
+                min(1, 0.065 / run.weapon.spec.interval),
+            ),
+            ("PENTE", spec.capacity / 40, run.weapon.spec.capacity / 40),
+        )
+        for i, (name, value, comparison) in enumerate(values):
+            by = y + 72 - i * 15
+            self.stats.draw(key + name, name, x + 18, by, 8, (166, 189, 189))
+            rect(x + 81, by + 2, 166, 4, (42, 61, 68))
+            rect(x + 81, by + 2, 166 * min(1, value), 4, tint)
+            marker = x + 81 + 166 * min(1, comparison)
+            rect(marker, by, 2, 8, WHITE)
+        if owned:
+            arcade.draw_rect_outline(
+                arcade.LBWH(x + 1, y + 1, w - 2, h - 2), (70, 167, 159), 1
+            )
+
     def on_draw(self):
         self.begin()
-        rect(25, 30, 910, 568, (12, 26, 34, 220))
-        text("ARSENAL / SUPRIMENTOS", 55, 550, 23, GOLD, bold=True)
-        text(f"CRÉDITOS $ {self.game.run.wallet:03d}", 620, 553, 23, GOLD, bold=True)
+        rect(25, 30, 910, 568, (12, 26, 34, 232))
+        text("ARSENAL / SUPRIMENTOS", 42, 550, 23, GOLD, bold=True)
+        text(f"$ {self.game.run.wallet:03d}", 767, 549, 25, GOLD, bold=True)
         text(
-            f"{self.game.stage.name}     VIDA {self.game.run.health}/5     FACAS {self.game.run.knives}",
-            57,
-            512,
+            f"{self.game.stage.name}    VIDA {self.game.run.health}/5    FACAS {self.game.run.knives}",
+            44,
+            515,
             12,
         )
         text(
-            "1 AK-47   2 SMG   3 ESCOPETA   4 RIFLE • troque durante a partida",
-            57,
-            488,
-            10,
-            (164, 191, 180),
+            f"ATUAL: {self.game.weapon.spec.name}  /  CLIQUE EM UMA ARMA ADQUIRIDA PARA EQUIPAR",
+            44,
+            494,
+            9,
+            (157, 188, 183),
         )
         for b in self.ui.buttons:
-            item = next((entry for entry in self.catalog if entry[0] == b.id), None)
-            if item:
-                owned = b.id in self.game.run.weapons
-                value = "COMPRADA" if owned else f"$ {self.game.run.price(b.id)}"
-                b.label = f"{item[1]} / {value}"
-        text(self.message, 57, 122, 12, GOLD)
+            if b.id in WEAPONS:
+                spec = WEAPONS[b.id]
+                b.label = spec.name.replace("RIFLE DE PRECISÃO", "RIFLE PRECISAO")
+                b.subtitle = (
+                    "5 projéteis / disparo"
+                    if b.id == "shotgun"
+                    else (
+                        "Perfura dois alvos"
+                        if b.id == "rifle"
+                        else "Leve / recarga rápida"
+                    )
+                )
+                b.unavailable = (
+                    b.id not in self.game.run.weapons
+                    and self.game.run.wallet < spec.price
+                )
+            elif b.id in ("knives", "damage", "rate", "heal"):
+                b.subtitle = (
+                    f"$ {self.game.run.price(b.id)}  / "
+                    + {
+                        "knives": f"ESTOQUE {self.game.run.knives}/30",
+                        "damage": f"NIVEL {self.game.run.damage_level}/3",
+                        "rate": f"NIVEL {self.game.run.rate_level}/2",
+                        "heal": "+2 VIDAS",
+                    }[b.id]
+                )
+                b.unavailable = self.game.run.wallet < self.game.run.price(b.id)
+        text(self.message, 44, 191, 11, (132, 225, 190) if self.success else RED)
         self.ui.draw()
+        if self.purchase_time:
+            rect(42, 184, 876, 2, (121, 224, 207) if self.success else RED)
 
     def on_key_press(self, key, modifiers):
         if key in (

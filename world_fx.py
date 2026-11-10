@@ -85,32 +85,6 @@ class Barrel(arcade.SpriteSolidColor):
 
 
 def draw_gun(x, y, angle, kind, recoil=0):
-    """As peças giram juntas ao redor da mão; o corpo continua na máquina de estados."""
-    c, s = math.cos(angle), math.sin(angle)
-    flip = -1 if c < 0 else 1
+    from weapon_art import GunPose, draw_weapon
 
-    def part(points, color):
-        pts = [
-            (x + (a - recoil) * c - b * flip * s, y + (a - recoil) * s + b * flip * c)
-            for a, b in points
-        ]
-        arcade.draw_polygon_filled(pts, color)
-
-    def box(a, b, w, h, color):
-        part([(a, b), (a + w, b), (a + w, b + h), (a, b + h)], color)
-
-    dark = (23, 35, 42)
-    steel = (88, 111, 120)
-    length = {"ak": 31, "smg": 24, "shotgun": 36, "rifle": 43}[kind]
-    box(-9, -4, 18, 8, dark)
-    box(-8, 0, 17, 3, steel)
-    box(-17, -3, 10, 6, (158, 96, 53) if kind in ("ak", "shotgun") else dark)
-    box(7, -2, length - 7, 4, dark)
-    box(10, -1, 9, 4, (165, 109, 59) if kind in ("ak", "shotgun") else steel)
-    box(length - 2, -1, 5, 3, (151, 165, 157))
-    if kind != "shotgun":
-        part([(1, -3), (8, -3), (6, -13), (1, -11)], dark)
-    if kind == "rifle":
-        box(-1, 5, 16, 4, dark)
-        box(2, 7, 8, 3, (97, 137, 161))
-    box(-8, -7, 8, 5, (234, 181, 121))
+    draw_weapon(GunPose((x, y), angle, kind, recoil))

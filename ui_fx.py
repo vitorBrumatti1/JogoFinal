@@ -54,7 +54,7 @@ class ScreenMotion:
         self.pending = [0.22, button.action]
         self.shot = [target, 0.22]
         if self.view.window:
-            self.view.window.audio.play("shot")
+            self.view.window.audio.play("menu")
         return True
 
     def click(self, x, y):
@@ -98,7 +98,11 @@ class ScreenMotion:
                 shift = b.hover * 8
                 arcade.draw_rect_filled(
                     arcade.LBWH(x + shift, y, w, h),
-                    (17 + int(b.hover * 17), 35 + int(b.hover * 13), 40, 235),
+                    (
+                        (23, 27, 35, 235)
+                        if getattr(b, "unavailable", False)
+                        else (17 + int(b.hover * 17), 35 + int(b.hover * 13), 40, 235)
+                    ),
                 )
                 arcade.draw_rect_filled(
                     arcade.LBWH(x + shift, y, 3 + b.hover * 3, h),
@@ -112,12 +116,14 @@ class ScreenMotion:
                 arcade.draw_text(
                     b.label,
                     x + 18 + shift,
-                    y + h * 0.53,
+                    y + h - 20 if getattr(b, "card", False) else y + h * 0.53,
                     (255, 226, 137) if b.hover > 0.25 else (237, 242, 218),
                     15,
                     bold=True,
                     anchor_y="center",
                 )
+                if getattr(b, "render_extra", None):
+                    b.render_extra()
                 if b.subtitle:
                     arcade.draw_text(
                         b.subtitle, x + 18 + shift, y + 8, (153, 185, 177), 10

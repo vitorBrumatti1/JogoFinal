@@ -20,6 +20,8 @@ def test_guard_cannot_shoot_backwards_and_has_slow_cadence(window):
     window.show_view(v)
     v.enemies.clear()
     v.barrels.clear()
+    # Isolate orientation from the new authored cover at x500.
+    v.ballistic.clear()
     e = Enemy(520, 130, "guard", 0, 100, 1000)
     e.direction = 1
     e.shot_clock = 0
@@ -71,12 +73,16 @@ def test_grenade_lands_warns_and_explodes_only_once(window):
 
 
 def test_enemy_wont_shoot_through_cover(window):
+    # V4: support platforms are transparent to bullets; cover is explicit.
+    from combat import Cover
+
     v = TelaJogo()
     window.show_view(v)
-    e = Enemy(170, 170, "guard", 0, 100, 240)
+    v.ballistic.append(Cover(270, 96))
+    e = Enemy(170, 130, "guard", 0, 100, 240)
     e.direction = 1
-    v.player.position = (470, 170)
-    assert not e.can_aim(v.player, v.blocks)
+    v.player.position = (470, 130)
+    assert not e.can_aim(v.player, v.ballistic)
 
 
 def test_menu_has_reference_structure_and_real_options(window):

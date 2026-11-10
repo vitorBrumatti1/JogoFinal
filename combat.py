@@ -2,6 +2,7 @@
 
 import math
 import arcade
+from weapon_art import TRAILS, COLORS
 
 
 class Grenade(arcade.SpriteSolidColor):
@@ -127,37 +128,23 @@ def draw_projectile(bullet):
         )
         return
     vx, vy = bullet.change_x, bullet.change_y
-    length = max(0.01, math.hypot(vx, vy))
-    ux, uy = vx / length, vy / length
-    trail = 24 if bullet.hostile else 40
-    tx, ty = x - ux * trail, y - uy * trail
+    speed = max(0.01, math.hypot(vx, vy))
+    ux, uy = vx / speed, vy / speed
+    kind = "hostile" if bullet.hostile else getattr(bullet, "kind", "ak")
+    trail = TRAILS[kind]
+    color = COLORS[kind]
+    # Compact silhouette; visual width is independent of the collision radius.
     arcade.draw_line(
-        tx,
-        ty,
-        x + ux * 7,
-        y + uy * 7,
-        (7, 13, 27, 245),
-        10 if not bullet.hostile else 12,
+        x - ux * trail, y - uy * trail, x + ux * 2, y + uy * 2, (14, 18, 28), 4
     )
     arcade.draw_line(
-        tx, ty, x, y, (255, 84, 143, 120) if bullet.hostile else (255, 173, 33, 95), 8
+        x - ux * (trail - 2), y - uy * (trail - 2), x + ux * 1, y + uy * 1, color, 2
     )
-    arcade.draw_line(
-        x - ux * 18,
-        y - uy * 18,
-        x + ux * 5,
-        y + uy * 5,
-        (255, 97, 146) if bullet.hostile else (255, 222, 64),
-        6,
-    )
-    arcade.draw_line(
-        x - ux * 11, y - uy * 11, x + ux * 4, y + uy * 4, (255, 246, 235), 2
-    )
-    if bullet.hostile:
-        arcade.draw_circle_filled(x, y, 4, (255, 237, 242))
+    arcade.draw_line(x - ux * 3, y - uy * 3, x + ux * 1, y + uy * 1, (255, 251, 228), 1)
 
 
-def muzzle_flash(x, y, angle):
+def muzzle_flash(x, y, angle, kind="ak"):
+    size = {"ak": 0.52, "smg": 0.36, "shotgun": 0.8, "rifle": 0.6}[kind]
     c, s = math.cos(angle), math.sin(angle)
     points = [
         (-4, 0),
@@ -172,9 +159,82 @@ def muzzle_flash(x, y, angle):
         (3, -5),
     ]
     arcade.draw_polygon_filled(
-        [(x + a * c - b * s, y + a * s + b * c) for a, b in points], (255, 156, 37)
+        [(x + (a * c - b * s) * size, y + (a * s + b * c) * size) for a, b in points],
+        (255, 156, 37),
     )
     points = [(-2, 0), (6, 4), (13, 0), (7, -4)]
     arcade.draw_polygon_filled(
-        [(x + a * c - b * s, y + a * s + b * c) for a, b in points], (255, 250, 181)
+        [(x + (a * c - b * s) * size, y + (a * s + b * c) * size) for a, b in points],
+        (255, 250, 181),
     )
+
+
+class Cover(arcade.SpriteSolidColor):
+    """Explicit ballistic cover; also a small jumpable physical obstacle."""
+
+    def __init__(self, x, floor=96):
+        super().__init__(36, 48, color=(67, 86, 96))
+        self.left = x
+        self.bottom = floor
+        self.ballistic = True
+        self.is_cover = True
+
+    def draw_fx(self, theme="jungle"):
+        x, y = self.left, self.bottom
+        base = (
+            (96, 112, 91)
+            if theme == "jungle"
+            else (107, 101, 85) if theme == "desert" else (77, 101, 124)
+        )
+        arcade.draw_rect_filled(arcade.LBWH(x, y, self.width, self.height), base)
+        arcade.draw_rect_outline(
+            arcade.LBWH(x + 2, y + 2, self.width - 4, self.height - 4), (23, 39, 49), 3
+        )
+        for dx in (6, self.width - 8):
+            for dy in (7, self.height - 9):
+                arcade.draw_rect_filled(
+                    arcade.LBWH(x + dx, y + dy, 3, 3), (190, 197, 168)
+                )
+        arcade.draw_line(
+            x + 8, y + 12, x + self.width - 8, y + self.height - 12, (190, 165, 87), 3
+        )
+
+
+def segment_box(start, end, bounds, radius=2.0):
+    """Slab intersection, returning first time along segment (0..1)."""
+    left, bottom, right, top = bounds
+    lo, hi = 0.0, 1.0
+    for origin, delta, minimum, maximum in (
+        (start[0], end[0] - start[0], left - radius, right + radius),
+        (start[1], end[1] - start[1], bottom - radius, top + radius),
+    ):
+        if abs(delta) < 1e-10:
+            if origin < minimum or origin > maximum:
+                return None
+            continue
+        a, b = (minimum - origin) / delta, (maximum - origin) / delta
+        if a > b:
+            a, b = b, a
+        lo = max(lo, a)
+        hi = min(hi, b)
+        if lo > hi:
+            return None
+    return lo
+
+
+def swept_contacts(start, end, groups, radius=2.0):
+    contacts = []
+    for category, sprites in groups:
+        for sprite in sprites:
+            hb = sprite.hit_box
+            t = segment_box(start, end, (hb.left, hb.bottom, hb.right, hb.top), radius)
+            if t is not None:
+                point = (
+                    start[0] + (end[0] - start[0]) * t,
+                    start[1] + (end[1] - start[1]) * t,
+                )
+                contacts.append(
+                    (t, 0 if category == "cover" else 1, category, sprite, point)
+                )
+    contacts.sort(key=lambda item: (item[0], item[1]))
+    return contacts

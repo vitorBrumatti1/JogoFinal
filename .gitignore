@@ -1,6 +1,30 @@
+# Python
 __pycache__/
+*.py[cod]
 .pytest_cache/
+.coverage
+htmlcov/
 .venv/
-*.pyc
+venv/
+env/
+
+# Local scores and SQLite sidecars
+ranking.db
 ranking.db-*
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local configuration and build artifacts
+.env
+.env.*
+!.env.example
+build/
+dist/
+*.egg-info/
+*.zip
+*.log
 .superpowers/

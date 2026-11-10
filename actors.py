@@ -40,6 +40,8 @@ class Jogador(arcade.Sprite):
             t.flip_left_right() for t in self.texturas_andando_direita
         ]
         super().__init__(self.textura_idle_direita, scale=0.55)
+        self.grounded = None
+        self.aim_facing = None
         self.virado_para = self.DIREITA
         self.frame_atual = 0
         self.tempo_animacao = 0.0
@@ -59,8 +61,10 @@ class Jogador(arcade.Sprite):
             self.virado_para = self.DIREITA
         elif self.change_x < 0:
             self.virado_para = self.ESQUERDA
+        if self.aim_facing is not None:
+            self.virado_para = self.aim_facing
         direita = self.virado_para == self.DIREITA
-        if abs(self.change_y) > 0.01:
+        if abs(self.change_y) > 0.01 or self.grounded is False:
             self.texture = (
                 self.textura_pulo_direita if direita else self.textura_pulo_esquerda
             )

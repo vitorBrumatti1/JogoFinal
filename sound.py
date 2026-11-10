@@ -9,7 +9,24 @@ class Audio:
         self.muted = False
         self.sounds = {}
         self.players = []
-        for name in ("shot", "hit", "coin", "jump", "reload", "boom", "clear"):
+        for name in (
+            "jump",
+            "clear",
+            "shot_ak",
+            "shot_smg",
+            "shot_shotgun",
+            "shot_rifle",
+            "impact",
+            "damage",
+            "dash",
+            "land",
+            "menu",
+            "victory",
+            "defeat",
+            "reload_v4",
+            "boom_v4",
+            "coin_v4",
+        ):
             try:
                 self.sounds[name] = arcade.load_sound(
                     str(Path(__file__).parent / "assets" / f"{name}.wav")
@@ -25,7 +42,12 @@ class Audio:
             return
         try:
             player = arcade.play_sound(
-                self.sounds[name], volume=0.22 if name == "shot" else 0.4
+                self.sounds[name],
+                volume=(
+                    0.28
+                    if name.startswith("shot")
+                    else (0.18 if name == "land" else 0.4)
+                ),
             )
             if player:
                 self.players.append(player)
