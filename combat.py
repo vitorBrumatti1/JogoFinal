@@ -1,0 +1,180 @@
+"""Granadas balísticas e efeitos legíveis sem alterar as colisões dos tiros."""
+
+import math
+import arcade
+
+
+class Grenade(arcade.SpriteSolidColor):
+    def __init__(self, x, y, vx=0):
+        super().__init__(14, 16, color=(139, 211, 86))
+        self.position = x, y
+        self.change_x = vx
+        self.change_y = -0.8
+        self.fuse = 3.0
+        self.grounded = False
+        self.exploded = False
+        self.age = 0.0
+
+    def tick(self, dt, walls):
+        if self.exploded:
+            return False
+        self.age += dt
+        if not self.grounded:
+            previous = self.bottom
+            self.change_y = max(-8, self.change_y - 0.12)
+            self.center_x += self.change_x
+            self.center_y += self.change_y
+            supports = [
+                b
+                for b in arcade.check_for_collision_with_list(self, walls)
+                if previous >= b.top - 9
+            ]
+            if supports:
+                self.bottom = max(b.top for b in supports)
+                self.change_x = 0
+                self.change_y = 0
+                self.grounded = True
+                self.fuse = min(self.fuse, 0.95)
+        self.fuse -= dt
+        if self.fuse <= 0:
+            self.exploded = True
+            return True
+        return False
+
+    def draw_fx(self):
+        x, y = self.position
+        for radius, alpha in ((14, 45), (10, 80)):
+            arcade.draw_circle_filled(x, y, radius, (255, 174, 46, alpha))
+        arcade.draw_rect_filled(arcade.LBWH(x - 9, y - 9, 18, 18), (11, 19, 30))
+        arcade.draw_rect_filled(arcade.LBWH(x - 6, y - 7, 12, 14), (114, 181, 73))
+        arcade.draw_rect_filled(arcade.LBWH(x - 4, y + 6, 8, 4), (194, 205, 189))
+        arcade.draw_line(x - 3, y - 6, x - 3, y + 4, (201, 236, 141), 2)
+        blink = int(self.age * (15 if self.grounded else 7)) % 2
+        arcade.draw_rect_filled(
+            arcade.LBWH(x - 2, y, 4, 4), (255, 73, 68) if blink else (255, 234, 125)
+        )
+        if self.grounded:
+            radius = 72 + math.sin(self.age * 18) * 3
+            arcade.draw_circle_outline(x, y, radius, (255, 126, 58, 200), 2)
+            arcade.draw_text(
+                "!", x, y + 25, (255, 212, 96), 17, bold=True, anchor_x="center"
+            )
+
+
+class Impact:
+    def __init__(self, x, y, explosion=False):
+        self.x = x
+        self.y = y
+        self.explosion = explosion
+        self.age = 0.0
+        self.life = 0.5 if explosion else 0.2
+
+    def update(self, dt):
+        self.age += dt
+        self.life -= dt
+
+    def draw(self):
+        t = self.age / (0.5 if self.explosion else 0.2)
+        alpha = max(0, int(220 * (1 - t)))
+        if self.explosion:
+            radius = 15 + t * 95
+            arcade.draw_circle_outline(
+                self.x, self.y, radius, (255, 183, 77, alpha), max(1, 5 * (1 - t))
+            )
+            arcade.draw_circle_outline(
+                self.x, self.y, radius * 0.7, (255, 242, 176, alpha // 2), 2
+            )
+            for i in range(7):
+                a = i * math.tau / 7
+                x = self.x + math.cos(a) * t * 45
+                y = self.y + math.sin(a) * t * 35 + t * 28
+                size = 10 + t * 15
+                arcade.draw_rect_filled(
+                    arcade.LBWH(x - size / 2, y - size / 2, size, size),
+                    (49, 34, 49, int(100 * (1 - t))),
+                )
+        else:
+            for i in range(6):
+                a = i * math.tau / 6
+                length = 6 + t * 21
+                arcade.draw_line(
+                    self.x + math.cos(a) * 4,
+                    self.y + math.sin(a) * 4,
+                    self.x + math.cos(a) * length,
+                    self.y + math.sin(a) * length,
+                    (255, 226, 132, alpha),
+                    2,
+                )
+
+
+def draw_projectile(bullet):
+    x, y = bullet.position
+    if bullet.knife:
+        a = math.radians(bullet.angle)
+        c, s = math.cos(a), math.sin(a)
+        arcade.draw_line(x - c * 13, y - s * 13, x + c * 13, y + s * 13, (9, 17, 27), 7)
+        arcade.draw_line(
+            x - c * 11, y - s * 11, x - c * 3, y - s * 3, (159, 105, 55), 4
+        )
+        arcade.draw_triangle_filled(
+            x - c * 3 - s * 3,
+            y - s * 3 + c * 3,
+            x + c * 15,
+            y + s * 15,
+            x - c * 3 + s * 3,
+            y - s * 3 - c * 3,
+            (230, 251, 255),
+        )
+        return
+    vx, vy = bullet.change_x, bullet.change_y
+    length = max(0.01, math.hypot(vx, vy))
+    ux, uy = vx / length, vy / length
+    trail = 24 if bullet.hostile else 40
+    tx, ty = x - ux * trail, y - uy * trail
+    arcade.draw_line(
+        tx,
+        ty,
+        x + ux * 7,
+        y + uy * 7,
+        (7, 13, 27, 245),
+        10 if not bullet.hostile else 12,
+    )
+    arcade.draw_line(
+        tx, ty, x, y, (255, 84, 143, 120) if bullet.hostile else (255, 173, 33, 95), 8
+    )
+    arcade.draw_line(
+        x - ux * 18,
+        y - uy * 18,
+        x + ux * 5,
+        y + uy * 5,
+        (255, 97, 146) if bullet.hostile else (255, 222, 64),
+        6,
+    )
+    arcade.draw_line(
+        x - ux * 11, y - uy * 11, x + ux * 4, y + uy * 4, (255, 246, 235), 2
+    )
+    if bullet.hostile:
+        arcade.draw_circle_filled(x, y, 4, (255, 237, 242))
+
+
+def muzzle_flash(x, y, angle):
+    c, s = math.cos(angle), math.sin(angle)
+    points = [
+        (-4, 0),
+        (4, 5),
+        (9, 3),
+        (18, 8),
+        (14, 1),
+        (26, 0),
+        (14, -2),
+        (18, -8),
+        (8, -3),
+        (3, -5),
+    ]
+    arcade.draw_polygon_filled(
+        [(x + a * c - b * s, y + a * s + b * c) for a, b in points], (255, 156, 37)
+    )
+    points = [(-2, 0), (6, 4), (13, 0), (7, -4)]
+    arcade.draw_polygon_filled(
+        [(x + a * c - b * s, y + a * s + b * c) for a, b in points], (255, 250, 181)
+    )
